@@ -44,6 +44,75 @@ public:
 	}
 };
 
+class exampleInitiator: sc_module, tlm::tlm_bw_transport_if<>
+{
+    private:
+#ifdef USEQK
+    tlm_utils::tlm_quantumkeeper quantumKeeper;
+#endif
+
+    public:
+    tlm::tlm_initiator_socket<> iSocket;
+    SC_CTOR(exampleInitiator) : iSocket("iSocket")
+    {
+        iSocket.bind(*this);
+        SC_THREAD(process);
+#ifdef USEQK
+        quantumKeeper.set_global_quantum(sc_time(10000,SC_NS)); // STATIC!
+        quantumKeeper.reset();
+#endif
+    }
+
+    void process()
+    {
+        // Write to memory:
+#ifdef LONG_RUN
+        for (int j = 0; j < 100000; j++)
+#endif
+        for (int i = 0; i < 1024; i++) {
+            tlm::tlm_generic_payload trans;
+            unsigned char data = rand();
+            trans.set_address(i);
+            trans.set_data_length(1);
+            trans.set_streaming_width(1);
+            trans.set_command(tlm::TLM_WRITE_COMMAND);
+            trans.set_data_ptr(&data);
+            trans.set_response_status( tlm::TLM_INCOMPLETE_RESPONSE );
+#ifdef USEQK
+            sc_time delay = quantumKeeper.get_local_time();
+#else
+            sc_time delay = SC_ZERO_TIME;
+#endif
+
+#ifdef PRINTING
+            cout << this->name() << ": B_TRANSPORT @" << sc_time_stamp()
+                 << " Local Time " << quantumKeeper.get_local_time() << endl;
+#endif
+            iSocket->b_transport(trans, delay);
+            if ( trans.is_response_error() )
+              SC_REPORT_FATAL(name(), "Response error from b_transport");
+
+#ifdef USEQK
+            quantumKeeper.set(delay); // Anotate the time of the target
+            quantumKeeper.inc(sc_time(10,SC_NS)); // Consume computation time
+#else
+            wait(delay+sc_time(10,SC_NS));
+#endif
+
+#ifdef USEQK
+            if(quantumKeeper.need_sync())
+            {
+#ifdef PRINTING
+                cout << this->name() << ": Context Switch @"
+                     << sc_time_stamp() << endl;
+#endif
+                quantumKeeper.sync();
+            }
+#endif
+        }
+    }
+};
+
 processor::processor(sc_module_name, std::string pathToFile, sc_time cycleTime) :
 	file(pathToFile), cycleTime(cycleTime)
 {
@@ -226,7 +295,16 @@ void processor::processRandom()
         cycles = distrCycle(randGenerator);
         address = distrAddr(randGenerator);
 
-        sc_time delay = cycles * cycleTime;
+        sc_time delay;
+
+        if (sc_time_stamp() <= cycles * cycleTime)
+        {
+            delay = cycles * cycleTime - sc_time_stamp();
+        }
+        else
+        {
+            delay = SC_ZERO_TIME;
+        }
 
         trans.set_address(address);
         iSocket->b_transport(trans, delay);
